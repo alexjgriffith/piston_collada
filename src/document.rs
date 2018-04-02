@@ -129,15 +129,22 @@ impl ColladaDocument {
     ///
     /// Populate and return an ObjSet for the meshes in the Collada document
     ///
-    pub fn get_obj_set(&self) -> Option<ObjSet> {
+    pub fn get_obj_set(&self) -> Option<Vec<ObjSet>> {
         let library_geometries = try_some!(self.root_element.get_child("library_geometries", self.get_ns()));
         let geometries = library_geometries.get_children("geometry", self.get_ns());
-        let objects = geometries.filter_map( |g| { self.get_object(g) }).collect();
+        let valid  : Vec<Vec<Object>> = geometries.filter_map( |g| {
+            //println!("Geos: {:?}", g);
+            // Option<Vec<Option<Object>>>
+            self.get_mesh_objects(g)
 
-        Some(ObjSet{
-            material_library: None,
-            objects: objects,
-        })
+        }).collect();
+        let obj_vec = valid.into_iter().map(|obj|{
+            ObjSet{
+                material_library: None,
+                objects: obj,
+            }
+        }).collect();
+        Some(obj_vec)
     }
 
     ///
@@ -296,17 +303,35 @@ impl ColladaDocument {
         Some(vertex_weights)
     }
 
-    fn get_object(&self, geometry_element: &xml::Element) -> Option<Object> {
+    fn get_mesh_objects (&self,geometry_element: &xml::Element) -> Option<Vec<Object>> {
         let id = try_some!(geometry_element.get_attribute("id", None));
         let mesh_element = try_some!(geometry_element.get_child("mesh", self.get_ns()));
-        let shapes = try_some!(self.get_shapes(mesh_element));
-
+        let (triangle_elements,_polylist_elements,_line_elements) =
+            (mesh_element.get_children("triangles",self.get_ns()),
+             mesh_element.get_children("polylist",self.get_ns()),
+             mesh_element.get_children("lines",self.get_ns()));
+        // Needs to be more defensive
+        // try some returns before going further
+        Some(triangle_elements.filter_map(|element|{
+            println!("{:?}",self.get_shapes(element,"triangles"));
+            match self.get_shapes(element,"triangles") {
+                Some(shape) => self.get_object(mesh_element,element,id,shape),
+                None => None
+            }            
+        }).collect())
+    }
+    
+    fn get_object(&self,
+                  mesh_element: &xml::Element,
+                  shape_element: &xml::Element,
+                  id: &str,
+                  shapes: Vec<Shape>) -> Option<Object> {
         // TODO cache bind_data_set
         let bind_data_set = try_some!(self.get_bind_data_set()); // FIXME -- might not actually have bind data
-        let bind_data_opt = bind_data_set.bind_data.iter().find(|bind_data| bind_data.object_name == id);
+        let bind_data_opt = bind_data_set.bind_data.iter().find(|bind_data| bind_data.object_name == id);        
 
-        let polylist_element = try_some!(mesh_element.get_child("polylist", self.get_ns()));
-
+        let polylist_element = shape_element;
+        println!("element: {:?}",polylist_element);
         let positions_input = try_some!(self.get_input(polylist_element, "VERTEX"));
         let positions_array = try_some!(self.get_array_for_input(mesh_element, positions_input));
         let positions: Vec<_> = positions_array.chunks(3).map(|coords| {
@@ -465,9 +490,11 @@ impl ColladaDocument {
         get_array_content(array_element)
     }
 
-    fn get_vtn_indices(&self, mesh_element: &xml::Element) -> Option<Vec<VTNIndex>> {
-
-        let polylist_element = try_some!(mesh_element.get_child("polylist", self.get_ns()));
+    // replace '&static str with an enum
+    fn get_vtn_indices(&self, polylist_element: &xml::Element) -> Option<Vec<VTNIndex>> {
+        // generalize, polylist triangle lines
+        // perhaps work into a macro?
+        // let polylist_element = try_some!(mesh_element.get_child("polylist", self.get_ns()));                
         let p_element = try_some!(polylist_element.get_child("p", self.get_ns()));
         let indices: Vec<usize> = try_some!(get_array_content(p_element));
 
@@ -496,31 +523,36 @@ impl ColladaDocument {
 
         Some(vtn_indices)
     }
-
-    fn get_shapes(&self, mesh_element: &xml::Element) -> Option<Vec<Shape>> {
-
-        let vtn_indices = try_some!(self.get_vtn_indices(mesh_element));
-
-        let polylist_element = try_some!(mesh_element.get_child("polylist", self.get_ns()));
-        let vcount_element = try_some!(polylist_element.get_child("vcount", self.get_ns()));
-        let vertex_counts: Vec<usize> = try_some!(get_array_content(vcount_element));
-
+    
+    fn get_shapes(&self,polylist_element: &xml::Element, vert_type: &'static str)
+                  -> Option<Vec<Shape>> {       
+        let vtn_indices = try_some!(self.get_vtn_indices(polylist_element));
         let mut vtn_iter = vtn_indices.iter();
-        let shapes = vertex_counts.iter().map(|vertex_count| {
-            match *vertex_count {
-                1 => Shape::Point(*vtn_iter.next().unwrap()),
-                2 => Shape::Line(*vtn_iter.next().unwrap(), *vtn_iter.next().unwrap()),
-                3 => Shape::Triangle(*vtn_iter.next().unwrap(), *vtn_iter.next().unwrap(), *vtn_iter.next().unwrap()),
-                n => {
-                    // Polys with more than 3 vertices not supported - try to advance and continue
-                    // TODO attempt to triangle-fy? (take a look at wavefront_obj)
-                    for _ in 0 .. n { vtn_iter.next(); };
-                    Shape::Point((0, None, None))
-                }
+        let shapes = match vert_type {
+            "triangles" =>{
+                let mut indx = 0..vtn_indices.len()/3;
+                indx.map(|_i|{Shape::Triangle(*vtn_iter.next().unwrap(),
+                                              *vtn_iter.next().unwrap(),
+                                              *vtn_iter.next().unwrap())}).collect()
             }
-        }).collect();
-
-
+            "polylists" =>{
+                let vcount_element = try_some!(polylist_element.get_child("vcount", self.get_ns()));
+                let vertex_counts: Vec<usize> = try_some!(get_array_content(vcount_element));
+                vertex_counts.iter().map(|vertex_count| {
+                    match *vertex_count {
+                        1 => Shape::Point(*vtn_iter.next().unwrap()),
+                        2 => Shape::Line(*vtn_iter.next().unwrap(), *vtn_iter.next().unwrap()),
+                        3 => Shape::Triangle(*vtn_iter.next().unwrap(), *vtn_iter.next().unwrap(), *vtn_iter.next().unwrap()),
+                        n => {
+                            // Polys with more than 3 vertices not supported - try to advance and continue
+                            // TODO attempt to triangle-fy? (take a look at wavefront_obj)
+                            for _ in 0 .. n { vtn_iter.next(); };
+                            Shape::Point((0, None, None))
+                        }
+                    }
+                }).collect()},
+            _ => return None
+        };        
         Some(shapes)
     }
 }
