@@ -129,7 +129,7 @@ impl ColladaDocument {
     ///
     /// Populate and return an ObjSet for the meshes in the Collada document
     ///
-    pub fn get_obj_set(&self) -> Option<Vec<ObjSet>> {
+    pub fn get_obj_set(&self) -> Option<ObjSet> {
         let library_geometries = try_some!(self.root_element.get_child("library_geometries", self.get_ns()));
         let geometries = library_geometries.get_children("geometry", self.get_ns());
         let valid  : Vec<Vec<Object>> = geometries.filter_map( |g| {
@@ -138,12 +138,16 @@ impl ColladaDocument {
             self.get_mesh_objects(g)
 
         }).collect();
-        let obj_vec = valid.into_iter().map(|obj|{
-            ObjSet{
-                material_library: None,
-                objects: obj,
-            }
-        }).collect();
+        // let obj_vec = valid.into_iter().map(|obj|{
+        //     ObjSet{
+        //         material_library: None,
+        //         objects: obj,
+        //     }
+        // }).collect();
+        let obj_vec =  ObjSet{
+            material_library: None,
+            objects: valid.concat()
+        };
         Some(obj_vec)
     }
 
@@ -306,19 +310,27 @@ impl ColladaDocument {
     fn get_mesh_objects (&self,geometry_element: &xml::Element) -> Option<Vec<Object>> {
         let id = try_some!(geometry_element.get_attribute("id", None));
         let mesh_element = try_some!(geometry_element.get_child("mesh", self.get_ns()));
-        let (triangle_elements,_polylist_elements,_line_elements) =
+        let (triangle_elements,polylist_elements,_line_elements) =
             (mesh_element.get_children("triangles",self.get_ns()),
              mesh_element.get_children("polylist",self.get_ns()),
              mesh_element.get_children("lines",self.get_ns()));
         // Needs to be more defensive
         // try some returns before going further
-        Some(triangle_elements.filter_map(|element|{
+        let mut triangle_geo : Vec<Object>  = triangle_elements.filter_map(|element|{
             println!("{:?}",self.get_shapes(element,"triangles"));
             match self.get_shapes(element,"triangles") {
                 Some(shape) => self.get_object(mesh_element,element,id,shape),
                 None => None
             }            
-        }).collect())
+        }).collect();
+        let mut polylist_geo : Vec<Object> = polylist_elements.filter_map(|element|{
+            println!("{:?}",self.get_shapes(element,"polylist"));
+            match self.get_shapes(element,"polylist") {
+                Some(shape) => self.get_object(mesh_element,element,id,shape),
+                None => None
+            }            
+        }).collect();
+        Some([&triangle_geo[..],&polylist_geo[..]].concat())
     }
     
     fn get_object(&self,
@@ -535,7 +547,7 @@ impl ColladaDocument {
                                               *vtn_iter.next().unwrap(),
                                               *vtn_iter.next().unwrap())}).collect()
             }
-            "polylists" =>{
+            "polylist" =>{
                 let vcount_element = try_some!(polylist_element.get_child("vcount", self.get_ns()));
                 let vertex_counts: Vec<usize> = try_some!(get_array_content(vcount_element));
                 vertex_counts.iter().map(|vertex_count| {
